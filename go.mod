@@ -1,4 +1,4 @@
-module content-reader
+module github.com/monzim/filecon
 
 go 1.23.0
 

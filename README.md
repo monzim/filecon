@@ -54,7 +54,7 @@ filecon [flags]
 # Note: Change the architecture to arm64 for Apple Silicon-based Macs. Check the 'build' folder for your architecture.
 
 
-sudo curl -L https://github.com/monzim/filecon/raw/main/build/filecon-macos-amd64 -o /usr/local/bin/filecon
+sudo curl -L -o /usr/local/bin/filecon https://github.com/monzim/filecon/raw/main/build/filecon-macos-arm64
 sudo chmod +x /usr/local/bin/filecon
 ```
 
@@ -63,7 +63,7 @@ sudo chmod +x /usr/local/bin/filecon
 ```bash
 # Note: Change the architecture to arm64 for ARM-based Linux systems. Check the 'build' folder for your architecture.
 
-sudo curl -L https://github.com/monzim/filecon/raw/main/build/filecon-linux -o /usr/local/bin/filecon
+sudo curl -L -o /usr/local/bin/filecon https://github.com/monzim/filecon/raw/main/build/filecon-linux
 sudo chmod +x /usr/local/bin/filecon
 ```
 

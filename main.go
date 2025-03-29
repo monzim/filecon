@@ -8,30 +8,28 @@ Usage:
   filecon [flags]
 
 Flags:
-  -d, --dir string    Directory to search for files (default is current directory)
-  -e, --ext string    File extension to search for (e.g., .go, .js, .py)
-  -o, --out string    Output file name (default is "output.txt")
-  -r, --remove-spaces Remove all tabs and extra spaces from the content (default false)
-  -h, --help          Help for filecon
+  -d, --dir string       Directory to search for files (default is current directory)
+  -e, --ext string       File extension to search for (e.g., .go, .js, .py)
+  -o, --out string       Output file name (default is "filecon_output.txt")
+  -r, --remove-spaces    Remove all tabs and extra spaces from the content (default false)
+  -i, --ignore-ext       File extensions to ignore (e.g., .tmp, .bak)
+  -f, --ignore-folders   Folders to ignore during search (e.g., node_modules, .git)
+  -h, --help             Help for filecon
 
 Examples:
   1. Run the interactive wizard:
      filecon
 
-  2. Concatenate all .go files in the current directory into output.txt:
+  2. Concatenate all .go files in the current directory into filecon_output.txt:
      filecon --dir=. --ext=.go --out=output.txt
 
-  3. Concatenate all .js files in /path/to/dir into result.js, removing extra spaces:
+  3. Concatenate all .js files in /path/to/dir into filecon_result.js, removing extra spaces:
      filecon --dir=/path/to/dir --ext=.js --out=result.js --remove-spaces
 
+  4. Concatenate all .py files in the current directory, ignoring .pyc files and the venv folder:
+     filecon --dir=. --ext=.py --ignore-ext=.pyc --ignore-folders=venv,__pycache__
+
 Note: If you don't provide all required flags (dir, ext, out), the interactive wizard will start.
-
-Examples:
-  1. Run the interactive wizard:
-     filecon
-
-  2. Concatenate all .go files in the current directory into output.txt:
-	filecon --dir=. --ext=.go --out=myoutput.txt --remove-spaces
 */
 
 package main
@@ -52,11 +50,18 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const (
+	version = "1.1.0"
+	gitRepo = "https://github.com/filecon/filecon"
+)
+
 var (
-	dir          string
-	fileType     string
-	outputFile   string
-	removeSpaces bool
+	dir           string
+	fileType      string
+	outputFile    string
+	removeSpaces  bool
+	ignoreExts    string
+	ignoreFolders string
 )
 
 var rootCmd = &cobra.Command{
@@ -77,7 +82,16 @@ var rootCmd = &cobra.Command{
 			}
 		}
 		if fileType != "" && outputFile != "" {
-			if err := concatenateFiles(dir, fileType, outputFile, removeSpaces); err != nil {
+			// Add filecon_ prefix to the output file if not already there
+			if !strings.HasPrefix(outputFile, "filecon_") {
+				outputFile = "filecon_" + outputFile
+			}
+
+			// Process the ignore extensions and folders
+			ignoreExtList := strings.Split(ignoreExts, ",")
+			ignoreFolderList := strings.Split(ignoreFolders, ",")
+
+			if err := concatenateFiles(dir, fileType, outputFile, removeSpaces, ignoreExtList, ignoreFolderList); err != nil {
 				fmt.Printf("Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -97,14 +111,18 @@ func init() {
 	rootCmd.Flags().StringVarP(&fileType, "ext", "e", "", "File extension to search for")
 	rootCmd.Flags().StringVarP(&outputFile, "out", "o", "", "Output file name (optional)")
 	rootCmd.Flags().BoolVarP(&removeSpaces, "remove-spaces", "r", false, "Remove all tabs and extra spaces from the content")
+	rootCmd.Flags().StringVarP(&ignoreExts, "ignore-ext", "i", "", "Comma-separated list of file extensions to ignore")
+	rootCmd.Flags().StringVarP(&ignoreFolders, "ignore-folders", "f", "", "Comma-separated list of folders to ignore")
 }
 
 type model struct {
-	inputs       []textinput.Model
-	currentInput int
-	err          error
-	done         bool
-	removeSpaces bool
+	inputs        []textinput.Model
+	currentInput  int
+	err           error
+	done          bool
+	removeSpaces  bool
+	ignoreExts    string
+	ignoreFolders string
 }
 
 var (
@@ -119,7 +137,7 @@ var (
 
 func initialModel() model {
 	m := model{
-		inputs: make([]textinput.Model, 3),
+		inputs: make([]textinput.Model, 5),
 	}
 
 	var t textinput.Model
@@ -135,7 +153,11 @@ func initialModel() model {
 		case 1:
 			t.Placeholder = "File extension (e.g., .dart)"
 		case 2:
-			t.Placeholder = "Output file (optional, default is output_<timestamp>.txt)"
+			t.Placeholder = "Output file (optional, default is filecon_<timestamp>.txt)"
+		case 3:
+			t.Placeholder = "Extensions to ignore (comma-separated, e.g., .tmp,.bak)"
+		case 4:
+			t.Placeholder = "Folders to ignore (comma-separated, e.g., node_modules,.git)"
 		}
 
 		m.inputs[i] = t
@@ -174,9 +196,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				outputFile := m.inputs[2].Value()
 				if outputFile == "" {
-					outputFile = fmt.Sprintf("output_%s.txt", time.Now().Format("20060102_150405"))
+					outputFile = fmt.Sprintf("filecon_%s.txt", time.Now().Format("20060102_150405"))
+				} else if !strings.HasPrefix(outputFile, "filecon_") {
+					outputFile = "filecon_" + outputFile
 				}
-				m.err = concatenateFiles(dir, m.inputs[1].Value(), outputFile, m.removeSpaces)
+
+				ignoreExtList := strings.Split(m.inputs[3].Value(), ",")
+				ignoreFolderList := strings.Split(m.inputs[4].Value(), ",")
+
+				m.err = concatenateFiles(dir, m.inputs[1].Value(), outputFile, m.removeSpaces, ignoreExtList, ignoreFolderList)
 				m.done = true
 				return m, tea.Quit
 			}
@@ -276,18 +304,49 @@ func main() {
 	}
 }
 
-func concatenateFiles(dir, fileType, outputFile string, removeSpaces bool) error {
+func concatenateFiles(dir, fileType, outputFile string, removeSpaces bool, ignoreExts, ignoreFolders []string) error {
 	outFile, err := os.Create(outputFile)
 	if err != nil {
 		return fmt.Errorf("error creating output file: %v", err)
 	}
 	defer outFile.Close()
 
+	// Write the filecon signature at the top of the file
+	signature := fmt.Sprintf("# Generated by File Concatenator (filecon) v%s\n# %s\n# Generated on: %s\n\n",
+		version,
+		gitRepo,
+		time.Now().Format("2006-01-02 15:04:05"))
+
+	if _, err = outFile.WriteString(signature); err != nil {
+		return fmt.Errorf("error writing signature to output file: %v", err)
+	}
+
 	err = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
-		if !info.IsDir() && strings.HasSuffix(info.Name(), fileType) {
+
+		// Skip directories that match any in the ignore list
+		if info.IsDir() {
+			for _, folder := range ignoreFolders {
+				folder = strings.TrimSpace(folder)
+				if folder != "" && strings.HasSuffix(path, folder) {
+					return filepath.SkipDir
+				}
+			}
+			return nil
+		}
+
+		// Skip files with extensions in the ignore list
+		for _, ext := range ignoreExts {
+			ext = strings.TrimSpace(ext)
+			if ext != "" && strings.HasSuffix(info.Name(), ext) {
+				return nil
+			}
+		}
+
+		// Process files with the target extension
+		if strings.HasSuffix(info.Name(), fileType) {
 			content, err := ioutil.ReadFile(path)
 			if err != nil {
 				return fmt.Errorf("error reading file %s: %v", path, err)

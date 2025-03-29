@@ -9,25 +9,41 @@ Usage:
 
 Flags:
   -d, --dir string       Directory to search for files (default is current directory)
-  -e, --ext string       File extension to search for (e.g., .go, .js, .py)
+  -e, --ext string       File extension to search for (e.g., go, js, py - with or without dot)
   -o, --out string       Output file name (default is "filecon_output.txt")
   -r, --remove-spaces    Remove all tabs and extra spaces from the content (default false)
-  -i, --ignore-ext       File extensions to ignore (e.g., .tmp, .bak)
+  -i, --ignore-ext       File extensions to ignore (e.g., tmp, bak - with or without dot)
   -f, --ignore-folders   Folders to ignore during search (e.g., node_modules, .git)
   -h, --help             Help for filecon
+
+Additional Features:
+  - Support for .fileconignore file in the target directory to specify files and folders to ignore
+  - Support for FILECON_EXTIGNORE environment variable to globally ignore file extensions
 
 Examples:
   1. Run the interactive wizard:
      filecon
 
   2. Concatenate all .go files in the current directory into filecon_output.txt:
-     filecon --dir=. --ext=.go --out=output.txt
+     filecon --dir=. --ext=go --out=output.txt
 
   3. Concatenate all .js files in /path/to/dir into filecon_result.js, removing extra spaces:
      filecon --dir=/path/to/dir --ext=.js --out=result.js --remove-spaces
 
   4. Concatenate all .py files in the current directory, ignoring .pyc files and the venv folder:
-     filecon --dir=. --ext=.py --ignore-ext=.pyc --ignore-folders=venv,__pycache__
+     filecon --dir=. --ext=py --ignore-ext=pyc --ignore-folders=venv,__pycache__
+
+  5. Using .fileconignore:
+     Create a file named .fileconignore in your target directory with patterns to ignore:
+     # Comments are supported
+     *.tmp
+     *.bak
+     node_modules/
+     .git/
+
+  6. Using environment variable:
+     export FILECON_EXTIGNORE=.tmp,.bak,.test.js
+     filecon --dir=. --ext=.js
 
 Note: If you don't provide all required flags (dir, ext, out), the interactive wizard will start.
 */
@@ -51,8 +67,11 @@ import (
 )
 
 const (
-	version = "1.1.0"
-	gitRepo = "https://github.com/filecon/filecon"
+	version        = "0.0.2"
+	gitRepo        = "https://github.com/monzim/filecon"
+	ignoreFileName = ".fileconignore"
+	envIgnoreVar   = "FILECON_EXTIGNORE"
+	developerURL   = "https://monzim.com"
 )
 
 var (
@@ -62,6 +81,14 @@ var (
 	removeSpaces  bool
 	ignoreExts    string
 	ignoreFolders string
+	ignoreInfo    []string // Used to collect information about ignore sources
+
+	// Stats for reporting
+	totalFilesScanned      int
+	totalFilesConcatenated int
+	totalOutputBytes       int64
+	totalOutputLines       int
+	filesIgnored           []string
 )
 
 var rootCmd = &cobra.Command{
@@ -89,13 +116,46 @@ var rootCmd = &cobra.Command{
 
 			// Process the ignore extensions and folders
 			ignoreExtList := strings.Split(ignoreExts, ",")
+			// Make sure all extensions have a dot
+			for i, ext := range ignoreExtList {
+				ext = strings.TrimSpace(ext)
+				if ext != "" && !strings.HasPrefix(ext, ".") {
+					ignoreExtList[i] = "." + ext
+				}
+			}
+
 			ignoreFolderList := strings.Split(ignoreFolders, ",")
+
+			// Check for environment variable
+			ignoreInfo = []string{}
+			if envIgnores := os.Getenv(envIgnoreVar); envIgnores != "" {
+				envIgnoreList := strings.Split(envIgnores, ",")
+				for _, ext := range envIgnoreList {
+					ext = strings.TrimSpace(ext)
+					if ext != "" {
+						if !strings.HasPrefix(ext, ".") {
+							ext = "." + ext
+						}
+						ignoreExtList = append(ignoreExtList, ext)
+					}
+				}
+				ignoreInfo = append(ignoreInfo, fmt.Sprintf("%s environment variable", envIgnoreVar))
+			}
+
+			// Check for .fileconignore file
+			ignoreFileExtList, ignoreFileFolderList, hasIgnoreFile := readIgnoreFile(dir)
+			if hasIgnoreFile {
+				ignoreExtList = append(ignoreExtList, ignoreFileExtList...)
+				ignoreFolderList = append(ignoreFolderList, ignoreFileFolderList...)
+				ignoreInfo = append(ignoreInfo, fmt.Sprintf("%s file", ignoreFileName))
+			}
 
 			if err := concatenateFiles(dir, fileType, outputFile, removeSpaces, ignoreExtList, ignoreFolderList); err != nil {
 				fmt.Printf("Error: %v\n", err)
 				os.Exit(1)
 			}
-			fmt.Println("File concatenation completed successfully!")
+
+			displaySummary(outputFile)
 		} else {
 			p := tea.NewProgram(initialModel())
 			if _, err := p.Run(); err != nil {
@@ -151,11 +211,11 @@ func initialModel() model {
 			t.Placeholder = "Directory (e.g., ., default is current directory)"
 			t.Focus()
 		case 1:
-			t.Placeholder = "File extension (e.g., .dart)"
+			t.Placeholder = "File extension (e.g., go, js, py - with or without dot)"
 		case 2:
 			t.Placeholder = "Output file (optional, default is filecon_<timestamp>.txt)"
 		case 3:
-			t.Placeholder = "Extensions to ignore (comma-separated, e.g., .tmp,.bak)"
+			t.Placeholder = "Extensions to ignore (comma-separated, e.g., tmp,bak)"
 		case 4:
 			t.Placeholder = "Folders to ignore (comma-separated, e.g., node_modules,.git)"
 		}
@@ -200,11 +260,47 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else if !strings.HasPrefix(outputFile, "filecon_") {
 					outputFile = "filecon_" + outputFile
 				}
+				fileExtension := m.inputs[1].Value()
+				// Make sure file extension starts with a dot
+				if fileExtension != "" && !strings.HasPrefix(fileExtension, ".") {
+					fileExtension = "." + fileExtension
+				}
 
 				ignoreExtList := strings.Split(m.inputs[3].Value(), ",")
+				// Make sure all ignore extensions have a dot
+				for i, ext := range ignoreExtList {
+					ext = strings.TrimSpace(ext)
+					if ext != "" && !strings.HasPrefix(ext, ".") {
+						ignoreExtList[i] = "." + ext
+					}
+				}
 				ignoreFolderList := strings.Split(m.inputs[4].Value(), ",")
 
-				m.err = concatenateFiles(dir, m.inputs[1].Value(), outputFile, m.removeSpaces, ignoreExtList, ignoreFolderList)
+				// Check for environment variable
+				ignoreInfo = []string{}
+				if envIgnores := os.Getenv(envIgnoreVar); envIgnores != "" {
+					envIgnoreList := strings.Split(envIgnores, ",")
+					for _, ext := range envIgnoreList {
+						ext = strings.TrimSpace(ext)
+						if ext != "" {
+							ignoreExtList = append(ignoreExtList, ext)
+						}
+					}
+					ignoreInfo = append(ignoreInfo, fmt.Sprintf("%s environment variable", envIgnoreVar))
+				}
+
+				// Check for .fileconignore file
+				ignoreFileExtList, ignoreFileFolderList, hasIgnoreFile := readIgnoreFile(dir)
+				if hasIgnoreFile {
+					ignoreExtList = append(ignoreExtList, ignoreFileExtList...)
+					ignoreFolderList = append(ignoreFolderList, ignoreFileFolderList...)
+					ignoreInfo = append(ignoreInfo, fmt.Sprintf("%s file", ignoreFileName))
+				}
+
+				m.err = concatenateFiles(dir, fileExtension, outputFile, m.removeSpaces, ignoreExtList, ignoreFolderList)
+				if m.err == nil {
+					displaySummary(outputFile)
+				}
 				m.done = true
 				return m, tea.Quit
 			}
@@ -263,7 +359,7 @@ func (m model) View() string {
 		return fmt.Sprintf("Error: %v\nPress any key to exit.", m.err)
 	}
 	if m.done {
-		return "File concatenation completed successfully!\nPress any key to exit."
+		return "Press any key to exit."
 	}
 
 	var b strings.Builder
@@ -304,7 +400,73 @@ func main() {
 	}
 }
 
+// readIgnoreFile reads the .fileconignore file and returns lists of extensions and folders to ignore
+func readIgnoreFile(dir string) ([]string, []string, bool) {
+	ignoreFilePath := filepath.Join(dir, ignoreFileName)
+
+	// Check if the file exists
+	if _, err := os.Stat(ignoreFilePath); os.IsNotExist(err) {
+		return nil, nil, false
+	}
+
+	// Read the file
+	content, err := ioutil.ReadFile(ignoreFilePath)
+	if err != nil {
+		fmt.Printf("Warning: Found %s but couldn't read it: %v\n", ignoreFileName, err)
+		return nil, nil, false
+	}
+
+	var extensions []string
+	var folders []string
+
+	lines := strings.Split(string(content), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		// Skip empty lines and comments
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		// Determine if it's a folder or extension
+		if strings.HasPrefix(line, "/") || strings.HasSuffix(line, "/") || !strings.Contains(line, ".") {
+			// It's a folder - clean up any slashes
+			line = strings.Trim(line, "/")
+			folders = append(folders, line)
+		} else if strings.HasPrefix(line, "*.") {
+			// It's a file extension pattern like "*.txt"
+			extensions = append(extensions, strings.TrimPrefix(line, "*"))
+		} else if strings.HasPrefix(line, ".") {
+			// It's a file extension directly like ".txt"
+			extensions = append(extensions, line)
+		} else if strings.Contains(line, ".") && !strings.Contains(line, "/") && !strings.Contains(line, "\\") {
+			// Likely a file extension without a dot prefix
+			if !strings.HasPrefix(line, ".") {
+				line = "." + line
+			}
+			extensions = append(extensions, line)
+		} else {
+			// Assume it's a specific filename or pattern
+			// For now, we're treating all other patterns as extensions
+			extensions = append(extensions, line)
+		}
+	}
+
+	return extensions, folders, true
+}
+
 func concatenateFiles(dir, fileType, outputFile string, removeSpaces bool, ignoreExts, ignoreFolders []string) error {
+	// Make sure fileType starts with a dot if it doesn't already
+	if fileType != "" && !strings.HasPrefix(fileType, ".") {
+		fileType = "." + fileType
+	}
+
+	// Reset stats
+	totalFilesScanned = 0
+	totalFilesConcatenated = 0
+	totalOutputBytes = 0
+	totalOutputLines = 0
+	filesIgnored = []string{}
+
 	outFile, err := os.Create(outputFile)
 	if err != nil {
 		return fmt.Errorf("error creating output file: %v", err)
@@ -312,10 +474,18 @@ func concatenateFiles(dir, fileType, outputFile string, removeSpaces bool, ignor
 	defer outFile.Close()
 
 	// Write the filecon signature at the top of the file
-	signature := fmt.Sprintf("# Generated by File Concatenator (filecon) v%s\n# %s\n# Generated on: %s\n\n",
+	signature := fmt.Sprintf("# Generated by File Concatenator (filecon) v%s\n# %s\n# Generated on: %s\n",
 		version,
 		gitRepo,
 		time.Now().Format("2006-01-02 15:04:05"))
+
+	// Add information about ignore sources if any
+	if len(ignoreInfo) > 0 {
+		signature += fmt.Sprintf("# Using ignore patterns from: %s\n", strings.Join(ignoreInfo, ", "))
+		signature += "# Tool developed by: https://monzim.com"
+	}
+
+	signature += "\n"
 
 	if _, err = outFile.WriteString(signature); err != nil {
 		return fmt.Errorf("error writing signature to output file: %v", err)
@@ -331,16 +501,21 @@ func concatenateFiles(dir, fileType, outputFile string, removeSpaces bool, ignor
 			for _, folder := range ignoreFolders {
 				folder = strings.TrimSpace(folder)
 				if folder != "" && strings.HasSuffix(path, folder) {
+					// Add to ignored files list
+					filesIgnored = append(filesIgnored, fmt.Sprintf("Directory: %s", path))
 					return filepath.SkipDir
 				}
 			}
 			return nil
 		}
 
+		totalFilesScanned++
+
 		// Skip files with extensions in the ignore list
 		for _, ext := range ignoreExts {
 			ext = strings.TrimSpace(ext)
 			if ext != "" && strings.HasSuffix(info.Name(), ext) {
+				filesIgnored = append(filesIgnored, path)
 				return nil
 			}
 		}
@@ -356,12 +531,19 @@ func concatenateFiles(dir, fileType, outputFile string, removeSpaces bool, ignor
 				content = removeTabsAndSpaces(content)
 			}
 
-			if _, err = outFile.WriteString(fmt.Sprintf("# %s\n---\n", path)); err != nil {
+			header := fmt.Sprintf("# %s\n---\n", path)
+			if _, err = outFile.WriteString(header); err != nil {
 				return fmt.Errorf("error writing to output file: %v", err)
 			}
-			if _, err = outFile.WriteString(string(content) + "\n\n"); err != nil {
+
+			contentStr := string(content) + "\n\n"
+			if _, err = outFile.WriteString(contentStr); err != nil {
 				return fmt.Errorf("error writing file content to output file: %v", err)
 			}
+
+			totalFilesConcatenated++
+			totalOutputBytes += int64(len(header) + len(contentStr))
+			totalOutputLines += strings.Count(contentStr, "\n") + 2 // +2 for header lines
 		}
 		return nil
 	})
@@ -386,4 +568,62 @@ func removeTabsAndSpaces(content []byte) []byte {
 		lines[i] = strings.TrimSpace(line)
 	}
 	return []byte(strings.Join(lines, "\n"))
+}
+
+func displaySummary(outputFile string) {
+	// Get output file info
+	fileInfo, err := os.Stat(outputFile)
+	fileSize := int64(0)
+	if err == nil {
+		fileSize = fileInfo.Size()
+	}
+
+	// Ensure the terminal respects newlines and spacing
+	divider := strings.Repeat("─", 50)
+	output := fmt.Sprintf(
+		"✅ File concatenation completed | Total files scanned: %d | Files concatenated: %d | Output file: %s | Output size: %.2f KB | Total lines: %d\n",
+		totalFilesScanned, totalFilesConcatenated, outputFile, float64(fileSize)/1024, totalOutputLines,
+	)
+
+	// Use raw `os.Stdout.WriteString()` to prevent Cobra formatting issues
+	// output := "\n✅ File concatenation completed successfully!\n\n" +
+	// 	divider + "\n" +
+	// 	"\n📊 SUMMARY:\n\n" +
+	// 	fmt.Sprintf("   Total files scanned:  %d\n", totalFilesScanned) +
+	// 	fmt.Sprintf("   Files concatenated:   %d\n", totalFilesConcatenated) +
+	// 	fmt.Sprintf("   Output file:          %s\n", outputFile) +
+	// 	fmt.Sprintf("   Output size:          %.2f KB\n", float64(fileSize)/1024) +
+	// 	fmt.Sprintf("   Total lines:          %d\n", totalOutputLines)
+
+	// Append ignored sources if any
+	if len(ignoreInfo) > 0 {
+		output += "\n" + divider + "\n🔍 IGNORE SOURCES:\n"
+		for _, source := range ignoreInfo {
+			output += fmt.Sprintf("   - %s\n", source)
+		}
+	}
+
+	// Append ignored files (limited to 5)
+	if len(filesIgnored) > 0 {
+		output += "\n" + divider + "\n⏭️ IGNORED FILES/DIRECTORIES:\n"
+		showCount := len(filesIgnored)
+		if showCount > 5 {
+			showCount = 5
+		}
+
+		for i := 0; i < showCount; i++ {
+			output += fmt.Sprintf("   - %s\n", filesIgnored[i])
+		}
+
+		if len(filesIgnored) > 5 {
+			output += fmt.Sprintf("   ... and %d more\n", len(filesIgnored)-5)
+		}
+	}
+
+	// Footer
+	output += "\n" + divider + "\n\nThank you for using filecon!\n" +
+		fmt.Sprintf("Developed by: %s\n\n", developerURL)
+
+	// Force proper printing using os.Stdout.WriteString()
+	os.Stdout.WriteString(output)
 }

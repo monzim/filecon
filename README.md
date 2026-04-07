@@ -1,3 +1,5 @@
+# my name is wadi
+
 # FileCon: File Concatenator CLI
 
 **FileCon** is a simple and efficient CLI tool that allows you to concatenate specific file types from a directory into a single output file. It provides both a wizard-style interface and command-line options for flexibility. You can also remove tabs and extra spaces from the content during concatenation.
